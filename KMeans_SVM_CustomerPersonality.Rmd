@@ -1,0 +1,437 @@
+---
+title: "Homework 5"
+author: "Lexie DeGrandchamp"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+library(lubridate)
+library(caret)
+```
+
+
+#Data Gathering and Integration
+I chose to work with the Customer Personality Analysis found on Kaggle (https://www.kaggle.com/datasets/imakash3011/customer-personality-analysis?resource=download). This data set stems from a customer survey of "ideal" customers and features many quantitative and qualitative variables on 2,240 customer records. I chose to use this data set because I thought it would lend itself well to both clustering (finding clusters or segments of customers is a useful tool for companies, and a common analyst ask) as well as classification. Exactly WHAT to classify wasn't immediately obvious from the data set, so before starting, I did a little data manipulation to find distributions of customer characteristics to explore interesting classification possibilities. 
+
+```{r include=FALSE}
+library(tidyverse)
+campaign <- read.delim("~/Documents/GradSchool/DSC441/Homework/Homework5/marketing_campaign.csv", stringsAsFactors=TRUE)
+```
+
+
+
+```{r}
+campaignFeatures <- campaign %>%
+                      mutate(boughtWine = if_else(MntWines > 0, 1, 0),
+                             boughtFruit = if_else(MntFruits > 0, 1, 0),
+                             boughtMeat = if_else(MntMeatProducts > 0, 1, 0),
+                             boughtFish = if_else(MntFishProducts > 0, 1, 0),
+                             boughtSweet = if_else(MntSweetProducts > 0, 1, 0),
+                             boughtGold = if_else(MntGoldProds > 0, 1, 0),
+                             webPurchaser = if_else(NumWebPurchases > 0, 1, 0),
+                             catPurchaser = if_else(NumCatalogPurchases > 0, 1, 0),
+                             storePurchaser = if_else(NumStorePurchases > 0, 1, 0)) %>%
+                      select(boughtWine, boughtFruit, boughtMeat, boughtFish, boughtSweet,
+                             boughtGold, webPurchaser, catPurchaser, storePurchaser) %>%
+                      pivot_longer(everything(),names_to = "characteristic", 
+                                   values_to = "sum") %>%
+                      group_by(characteristic) %>%
+                      summarize(sum = sum(sum),
+                                pct = (sum/2240)*100)
+campaignFeatures
+```
+
+I wanted to choose a classification variable that was binary and not too heavily weighted toward one of the two categories. For this exercise, I'll be classifying if the customer is someone who has made a Catalog Purchase (in the table above, catPurchaser represents those who have purchased from a catalog; 73.84% of customers surveyed in this data set had). Understanding how customers shop is a key insight for retailers, and catalogs can be an expensive and wasteful marketing tool if customers won't buy from a catalog. This classifier could be used to best target new customers or prospective customers with the right marketing technique: sending catalogs to those who appreciate them, skipping those who are unlikely to purchase. This classification method could later be expanded to store and web purchasing with a few tweaks, since those are more heavily weighted in favor of "yes" in this data set.
+
+Once I selected the tasks I would perform, it was time to explore the data.
+
+#Data Exploration
+To start exploring the data, I observed the summary of the data set:
+```{r echo=FALSE}
+summary(campaign)
+```
+There are a few early outliers in Year_Birth, Marital_Status, and Income, as well as some N/A data in Income Z_CostContact and Z_Revenue won't be useful due to having identical values for each observation. Since there's a large number of numeric values, it's useful to explore correlations. I observed correlations in dollar value of purchases per category.
+
+```{r echo=FALSE}
+library(tidyverse)
+purchAmt <- campaign %>%
+              select(MntWines, MntFruits, MntMeatProducts, MntFishProducts,
+                     MntSweetProducts, MntGoldProds)
+plot(purchAmt)
+```
+This correlation seems to suggest that buying meat products correlates most strongly to purchasing other types of products, showing a positive, often fanned relationship. This could suggest that meat buyers may be more amenable to add-on purchases or that meat is an enticing add-on suggestion. 
+
+Categorical variables were explored with histograms or bar graphs of counts. Most interesting were the distribution of income (once an outlier with income level listed as $666,666 was removed) and recency. For income, a relatively bell-shaped distribution exists, but there is a long tail as incomes trend higher. For recency, the data shows an even distribution.
+
+```{r echo=FALSE}
+hist(campaign$Income)
+hist(campaign$Recency)
+```
+The data exploration provided some early insights into the data set, as well as some stark cleaning needs.
+
+#Data Cleaning
+I performed a variety of data cleaning tasks, such as:
+--removing rows that had NULL values (there were only 24 in a data set of 2200+)
+--removing row with outlier/incorrect income value
+--removing rows with outlier/incorrect Year_Birth values (3 total); I also calculated an age variable based on surmised data set date of 2014
+--re-factoring and cleaning nonsense answers on Marital_Status; transformed to relationshipStatus and removed redundant Marital_Status
+--removing unneeded variables ID, Z_CostContact, Z_Revenue
+--re-factoring and cleaning nonsense answers on Education; transformed to educationLevel and removed redundant Education
+--creating binary variable hasChildren
+--creating numeric variable numPurchases (sum of all purchases, last 2 years)
+--creating numeric variable amtSpent (sum of all purchase totals, last 2 years)
+--transforming date into usable date object as customerFromDate, extracting yearCust as a factor variable, creating custLength as measure of months (a rough estimation; assumed 4-week months) spent as customer
+--confirming that the AcceptedCmpX variables (5 total) were true binary variables (in other words, confirmed that AcceptedCmp1 did not exclude a customer from AcceptedCmp2)
+
+The clean data set and its summary statistics are below:
+```{r include=FALSE}
+campaign <- na.omit(campaign) #since there's only 24 rows of missing data, this is not a huge loss
+
+#cleaning year of birth - removing nonsense years
+campaign <- campaign %>%
+              mutate(age = 2014 - Year_Birth)
+summary(campaign$age)
+
+ages <- head(sort(campaign$age, decreasing = TRUE), n = 3)
+
+campaignClean <- campaign %>%
+                  filter(!age %in% ages) #due to mistakes I needed something that didn't delete the entire data set in one go...
+
+#simplifying and cleansing nonsense answers under Marital_Status
+campaignClean <- campaignClean %>%
+                  mutate(relationshipStatus = case_when(Marital_Status == 'Absurd' ~ 'Single',
+                                                        Marital_Status == 'Alone' ~ 'Single',
+                                                        Marital_Status == 'Together' ~ 'In a Relationship',
+                                                        Marital_Status == 'YOLO' ~ 'Single',
+                                                        TRUE ~ as.character(Marital_Status)))
+campaignClean$relationshipStatus <- as.factor(campaignClean$relationshipStatus)
+summary(campaignClean$relationshipStatus)
+ggplot(campaignClean, aes(x = relationshipStatus)) +
+  geom_bar(stat = "count")
+
+campaignClean <- campaignClean %>%
+                  select(-Marital_Status) #dupe column not needed
+
+campaignClean <- campaignClean %>%
+                  select(-c(Z_CostContact, Z_Revenue)) #same value each row; removed
+
+#simplifying and cleansing nonsense answers under Education
+campaignClean <- campaignClean %>%
+                  mutate(educationLevel = case_when(Education == '2n Cycle' ~ "Bachelors",
+                                                    Education == 'Basic' ~ "Bachelors",
+                                                    Education == 'Graduation' ~ "Masters",
+                                                    Education == 'Master' ~ "Masters",
+                                                    Education == 'PhD' ~ "PhD"))
+campaignClean$educationLevel <- as.factor(campaignClean$educationLevel)
+summary(campaignClean$Education)
+summary(campaignClean$educationLevel) #this is a very smart consumer base for wine and meat products
+
+campaignClean <- campaignClean %>%
+                  select(-Education) #no longer needed
+
+#value-add: using number of children + number of teens to create binary hasChildren
+campaignClean <- campaignClean %>%
+                    mutate(hasChildren = case_when(Kidhome > 0 ~ 1,
+                                                   Teenhome > 0 ~ 1,
+                                                   TRUE ~ 0))
+
+ggplot(campaignClean, aes(x = hasChildren)) +
+  geom_bar(stat = "count")
+
+#value-add: combining purchase variables into a sum of all purchases, 
+#combining product amounts into sum of all dollars spent in last 2 years
+campaignClean <- campaignClean %>%
+                    mutate(numPurchases = NumWebPurchases + NumCatalogPurchases +
+                                          NumStorePurchases,
+                           amtSpent = MntWines + MntFruits + MntMeatProducts +
+                                      MntFishProducts + MntSweetProducts + MntGoldProds)
+
+#trying to tackle cleaning the date to be usable data
+summary(campaignClean$Dt_Customer)
+
+campaignClean$Dt_Customer <- as.character(campaignClean$Dt_Customer)
+
+campaignDates <- campaignClean %>%
+                  mutate(date2 = mdy(Dt_Customer)) %>%
+                  select(Dt_Customer, date2)
+
+campaignClean <- campaignClean %>%
+                  mutate(date2 = mdy(Dt_Customer),
+                         date3 = dmy(Dt_Customer))
+
+campaignDates <- campaignClean %>%
+                  select(Dt_Customer, date2, date3) #date3 is correct date parsing
+
+campaignClean <- campaignClean %>%
+                  mutate(customerFromDate = dmy(Dt_Customer),
+                         yearCust = year(customerFromDate),
+                         monthCust = month(customerFromDate),
+                         dayCust = day(customerFromDate))
+
+max(campaignClean$customerFromDate)
+min(campaignClean$customerFromDate)
+str(campaignClean$yearCust)
+
+campaignClean$yearCust <- as.factor(campaignClean$yearCust)
+campaignClean$Year_Birth <- as.factor(campaignClean$Year_Birth)
+
+campaignClean <- campaignClean %>%
+                  select(-c(date2, date3, Dt_Customer))
+
+#experimenting with trying to find number of months individual has been customer
+proxyDate <- dmy("31-07-2014") #since max date is June 2014, I modeled building this report in July 2014
+sampleDate <- campaignClean[1,"customerFromDate"]
+sampleOut <- as.numeric(difftime(proxyDate, sampleDate, units = "weeks"))
+sampleOut <- proxyDate - sampleDate
+sampleOut
+
+campaignClean <- campaignClean %>%
+                  mutate(proxyDate = dmy("31-07-2014"),
+                         custLength = as.numeric(difftime(proxyDate, customerFromDate, units = "weeks"))/4)
+
+#it has clearly been A Minute since I've worked with dates in R. Yeesh.
+
+campaignClean <- campaignClean %>%
+                    select(-proxyDate) #no longer needed
+
+campaignClean <- campaignClean %>%
+                  select(-c(monthCust, dayCust)) #didn't need after all
+
+#some of these variables are going to be covariant, like custLength + customerFromDate + yearCust
+#keeping them in for now and then will create a model subset for non-covariant points
+
+#exploring the campaign acceptance to see if a customer can respond to more than one
+campaignAcceptance <- campaignClean %>%
+                        select(AcceptedCmp1, AcceptedCmp2, AcceptedCmp3,
+                               AcceptedCmp4, AcceptedCmp5) %>%
+                        mutate(sumCamp = AcceptedCmp1 + AcceptedCmp2 + AcceptedCmp3 +
+                                 AcceptedCmp4 + AcceptedCmp5) %>%
+                        group_by(sumCamp) %>%
+                        summarize(n = n()) #they can, so I'm keeping in all 5 variables
+
+#finally, removing ID because we're not joining this set to anything; having it is silly
+campaignClean <- campaignClean %>%
+                  select(-ID)
+```
+
+
+
+```{r}
+summary(campaignClean)
+```
+
+#Data Preprocessing
+I want to use an SVM classifier as one of my two classifiers to classify a customer as a Catalog Shopper (or not) because my data set is high-dimensional and can be easily converted to fully numeric variables. I also want to normalize my variables, setting all to a 0-1 scale (I have several binary variables already, and the dummy variables will add to that). But first, I want to reduce some of the dimensionality of my data to remove covariant variables.
+
+I removed variables Year_Birth (because I calculated age instead), Kidshome and Teenhome (because I calculated total number of children in the home instead), customerFromDate and yearCustomer (I think custLength is best measure here), as well as the 5 AcceptedCmp variables (because Recency and NumberDealsPurchases create nice stand-ins for what those variables tell us about their campaign response rates. These can be useful variables for other analyses, but not necessarily clustering and SVM for catalog purchasing classification). This left 22 variables. After doing a quick pairwise correlation check, I decided against including the summary variables numPurchases and amtSpent because, while not covariant with variables per se, it was high enough that I opted out of including them. 
+
+I then created dummy variables for my two categorical variables, relationshipStatus and educationLevel, by using the dummyVars function from the caret package to create each dummy variable by column, then predicting the results into a new data frame. I bound the three data frames together and removed the original dummy variables relationshipStatus and educationLevel.
+
+Last, I normalized my data using the caret library's preProcess function, using a method range with range bounds 0-1. As a final set, I created two sets ready for clustering and classification: campaignNorm, with all normalized predictor variables, and campaignClass, which is identical to campaignNorm but it includes the classification label "catPurchaser". A summary of campaignClass is below.
+
+```{r include=FALSE}
+campaignPreProc <- campaignClean[,-c(1, 3, 4, 30)] #removing year_birth (we have age),
+#Kidshome and Teenhome (we have hasKids), and customerFromDate (we have two other dates)
+
+campaignPreProc <- campaignPreProc[,-c(14:18)] #removing accepted campaigns 1-5 because recency will show if they accepted the last campaign; close enough
+
+campaignPreProc <- campaignPreProc[,-c(22)] #keeping customer length rather than year
+
+dummyRel <- dummyVars("~ relationshipStatus", data = campaignPreProc)
+holdRelVars <- data.frame(predict(dummyRel, newdata = campaignPreProc))
+
+dummyEd <- dummyVars("~ educationLevel", data = campaignPreProc)
+holdEdVars <- data.frame(predict(dummyEd, newdata = campaignPreProc))
+
+campaignPreProc <- campaignPreProc %>%
+                    bind_cols(holdEdVars)
+campaignPreProc <- campaignPreProc %>%
+                    bind_cols(holdRelVars)
+
+campaignPreProc <- campaignPreProc[,-c(17:18)]
+
+preProc <- preProcess(campaignPreProc, method = "range", rangeBounds = c(0,1))
+campaignNorm <- predict(preProc, campaignPreProc)
+summary(campaignNorm)
+
+campaignClass <- campaignNorm %>%
+                  mutate(catPurchaser = if_else(NumCatalogPurchases > 0, 1, 0))
+
+cor(campaignNorm)
+
+campaignNorm <- campaignNorm[,-c(18:19)]
+campaignClass <- campaignClass[,-c(18:19)]
+```
+
+
+```{r echo=FALSE}
+summary(campaignClass)
+```
+
+#Clustering
+I've chosen to use k-means clustering for this data set because my data has been normalized and outliers handled, so some of the pitfalls of k-means are not factors. 
+
+I started clustering by choosing the number of clusters:
+```{r}
+library(caret)
+library(factoextra)
+set.seed(123)
+fviz_nbclust(campaignNorm, kmeans, method = "wss") 
+fviz_nbclust(campaignNorm, kmeans, method = "silhouette") 
+```
+The scree plot showed potential clusters at 5, 7, or 9, where the silhouette showed 10. I went with 9 clusters based on the it being a strong value in both methods.
+
+Next, I performed the clustering and visualized:
+```{r}
+clusterCampaign <- kmeans(campaignNorm, centers = 9, nstart = 25)
+pca <- prcomp(campaignNorm)
+rotatedClusterData <- as.data.frame(pca$x)
+rotatedClusterData$Clusters <- as.factor(clusterCampaign$cluster)
+
+ggplot(data = rotatedClusterData, aes(x = PC1, y = PC2, col = Clusters)) +
+  geom_point(alpha = 0.5) +
+  scale_colour_brewer(palette="Set1") +
+  theme_minimal()
+```
+
+It looks like of the 9 customer clusters, 6 clusters are actually quite closely related, while the other three might have separate characteristics. If I were to continue exploring this data, I might try to find some way of segmenting these three distinct patterns to overlay on my 9 clusters to provide maximum value to my marketing team.
+
+#Classification - SVM 
+I chose to first do an SVM Linear classifier to predict catalog purchases. Early tests of the classifier revealed that because catPurchaser was based off NumCatPurchases, the classifier was returning 100% accuracy. Since the hypothetical use case here is targeting customers and prospects for whom we may not have this information in order to determine whether to mail them a catalog, I removed the NumPurchases columns for Store, Web, and Catalog from the campaignClass set. I also used a stratified cross-validation, since the data set is skewed towards catalog purchasers. 
+
+I first built a model without tuning:
+```{r}
+folds <- 10
+idx <- createFolds(campaignClass$catPurchaser, folds, returnTrain = T)
+train_control_strat <- trainControl(index = idx, method = "cv", number = folds)
+
+svmCampaign <- train(catPurchaser ~ ., data = campaignClass, method = "svmLinear",
+                     trControl = train_control_strat) #pre-scaled so not including here
+svmCampaign
+```
+The model displayed 91.95% accuracy at predicting catalog purchasers, which suggests my team may receive a strong return on investment from sending catalogs to potential customers. 
+
+I also ran the model to tune the C:
+```{r}
+grid <- expand.grid(C = 10^seq(-5,2,0.5))
+svm_grid <- train(catPurchaser ~ ., data = campaignClass, method = "svmLinear",
+                  trControl = train_control_strat, tuneGrid = grid)
+svm_grid
+```
+Cs from 0.03 to 100 all had high accuracy scores, so I'd likely continue using C = 1 if further revising the model.
+
+#Classification - Decision Tree
+I also classified via decision tree. I do not believe this method will be better than SVM because there are too many variables. To model the tree, I used a non-normalized, non-dummified version of the data set, since those aren't required for a decision tree and I thought the dummies in particular might add too many unneeded variables for a tree to process. 
+
+```{r include=FALSE}
+campaignTree <- campaignClean[,-c(1, 3, 4, 30)]
+campaignTree <- campaignTree[,-c(14:18)] 
+campaignTree <- campaignTree[,-c(22)] 
+campaignTree <- campaignTree %>%
+                  mutate(catPurchaser = if_else(NumCatalogPurchases > 0, 1, 0))
+campaignTree$catPurchaser <- as.factor(campaignTree$catPurchaser)
+
+campaignTree <- campaignTree[,-c(10:12)]
+campaignTree <- campaignTree[,-c(17:18)]
+```
+
+
+I started with an un-tuned tree:
+```{r}
+library(rpart)
+library(rattle)
+treeCampaign2 <- train(catPurchaser ~ ., data = campaignTree, method = "rpart1SE",
+                       trControl = train_control_strat)
+treeCampaign2
+fancyRpartPlot(treeCampaign2$finalModel, caption = "")
+```
+My tree has three levels, and it looks (without a confusion matrix) to be roughly accurate. The tree suggests that buyers with low purchase values in gold and/or wine are not catalog purchasers.
+
+I also tried tuning the minsplit and minbucket parameters. Because the default depth is 30 and I have a lot of variables, I didn't want to unnecessarily limit the model from selecting among variables.
+
+```{r}
+hypers = rpart.control(minsplit = 200)
+treeCampaign3 <- train(catPurchaser ~ ., data = campaignTree, control = hypers,
+                       trControl = train_control_strat, method = "rpart1SE")
+treeCampaign3
+fancyRpartPlot(treeCampaign3$finalModel, caption = "")
+```
+Tuning minsplit alone creates the same model.
+
+```{r}
+hypers = rpart.control(minsplit = 400, minbucket = 300)
+treeCampaign4 <- train(catPurchaser ~ ., data = campaignTree, control = hypers,
+                       trControl = train_control_strat, method = "rpart1SE")
+treeCampaign4
+fancyRpartPlot(treeCampaign4$finalModel, caption = "")
+```
+Tuning minsplit and minbucket oversimplifies the model. For evaluation purposes, I'll choose between the base SVM model and tree2 (original tree).
+
+```{r include=FALSE}
+campaignClass$catPurchaser <- as.factor(campaignClass$catPurchaser)
+campaignTree$catPurchaser <- as.factor(campaignTree$catPurchaser)
+
+```
+
+
+The two classification models performed remarkably similarly on a confusion matrix evaluation*. Because the cost of sending a catalog is non-zero, I'll favor the classification model that has a slightly lower rate of false positives, the SVM classifier.
+
+*RMarkdown was experiencing difficulties recreating this matrix for reasons unknown, so recreating a simplified version of the matrix below.
+
+#Evaluation
+To evaluate my classifier, I'll repeat the SVM confusion matrix below:
+
+*again, there were difficulties. Confusion matrix:
+
+I calculated recall and precision rates (confirmed with the confusion matrix's metrics) as follows. Both recall and precision are quite high on this classifier:
+```{r}
+svmPrecision <- 507/(507 + 68)
+svmRecall <- 507/(507 + 100)
+svmRecall
+svmPrecision
+```
+
+```{r}
+campaignROC <- campaignClass %>%
+                mutate(catPurchaser2 = ifelse(catPurchaser == 0, "no", "yes"))
+campaignROC$catPurchaser2 <- as.factor(campaignROC$catPurchaser2)
+
+campaignROC <- campaignROC[,-24]
+
+index <- createDataPartition(y = campaignROC$catPurchaser2, p = 0.6, list = FALSE)
+trainCamp <- campaignROC[index,]
+testCamp <- campaignROC[-index,]
+```
+
+
+I then calculated the ROC. **Note: the ROC calculations were not pleased with a binary variable 0/1 as the classification value, so I had to do some last-minute cleaning to convert 0 to "no" and 1 to "yes". I did this in a fresh data frame; this work is not included in the code below.
+```{r}
+library(pROC)
+index <- createDataPartition(y = campaignROC$catPurchaser2, p = 0.6, list = FALSE)
+trainCamp <- campaignROC[index,]
+testCamp <- campaignROC[-index,]
+
+train_control <- trainControl(method = "cv", number = folds, classProbs = TRUE)
+
+svmCampaign2 <- train(catPurchaser2 ~ ., data = trainCamp, method = "svmLinear",
+                     trControl = train_control, metric = "ROC") 
+
+pred_svm_prob <- predict(svmCampaign2, testCamp, type = "prob")
+roc_obj <- roc((testCamp$catPurchaser2),pred_svm_prob[,1])
+plot(roc_obj, print.auc = TRUE)
+```
+
+The area under the curve for the SVM classifier is high. This appears to be a good way of predicting if a customer will purchase from the catalog.
+
+#Report Conclusions
+I specifically chose this data set because I wanted to work with a big set of data with some error and mess, particularly with a lot of variables to see how the concepts we applied in this class would scale with unknown, highly dimensional data. I think the biggest takeaway from the data was that the clustering in particular is not the end of finding insights in data. The 9 customer clusters I discovered have utility beyond just understanding their commonalities, and the visualizations helped outline a path for further development. In addition, it was interesting to see how well a somewhat skewed classification label performed in an SVM model, and it would be interesting to test this model out on further generated data to see how it performs on unseen data. 
+
+#Reflection
+I so enjoyed my quarter in this course. As a data analyst and data manager, I've been feeling burnt out and lost in my profession. After a tough year professionally and an elongated job search, I had been feeling like I couldn't really "data" like other people "data". This course has given me new purpose and skills that I've already put to use in my professional life. For example, my team builds decision trees - a bit manually, to be sure - for client data for manual classification purposes to complex taxonomies. Understanding the foundation and theory behind decision trees, and building some from sample data sets, gave me a new appreciation and way of approaching client data that I was lacking previously. I had been considering leaving analytics altogether for the data engineering space, but I am eager to give analytics, and maybe eventually an ML or AI role, another go after this course! 
